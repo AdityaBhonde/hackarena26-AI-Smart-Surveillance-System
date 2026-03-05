@@ -19,6 +19,10 @@ from routes.status import status_bp
 from routes.alerts import alerts_bp
 from routes.analytics import analytics_bp
 
+# ✅ NEW: IMPORT CLIPS ROUTE
+from routes.clips import clips_bp
+
+
 app = Flask(__name__)
 CORS(app)
 
@@ -65,7 +69,7 @@ def master_frame_updater():
             with state.frame_lock:
                 state.latest_frame = frame.copy()
 
-            # ✅ NEW: store frame in circular buffer (for pre-alert recording)
+            # ✅ store frame in circular buffer
             state.frame_buffer.append(frame.copy())
 
         time.sleep(0.01)
@@ -97,10 +101,9 @@ def start_detection_system():
         state.camera_manager = CameraStream(src=0).start()
         state.detection_active = True
 
-        # 🔥 START CLIP RECORDER THREAD (NEW)
+        # 🔥 START CLIP RECORDER
         start_clip_recorder()
 
-        # 🔥 START MASTER FRAME THREAD FIRST
         threading.Thread(target=master_frame_updater, daemon=True).start()
         time.sleep(0.2)
 
@@ -164,9 +167,13 @@ def home():
     return render_template("dashboard.html")
 
 
+# ===================== REGISTER ROUTES =====================
 app.register_blueprint(status_bp)
 app.register_blueprint(alerts_bp)
 app.register_blueprint(analytics_bp)
+
+# ✅ NEW
+app.register_blueprint(clips_bp)
 
 
 if __name__ == "__main__":
