@@ -1,5 +1,5 @@
 # ============================================================
-# utils/clip_recorder.py
+# utils/clip_recorder.py (FIXED: Browser-Compatible Codec)
 # ============================================================
 
 import os
@@ -7,26 +7,23 @@ import cv2
 import time
 import threading
 from datetime import datetime
-from collections import deque
 import shared_state as state
 
-# -----------------------------
-# CONFIGURATION
-# -----------------------------
 PRE_SECONDS = 3
 POST_SECONDS = 5
-FPS = 30
+FPS = 20
 OUTPUT_DIR = "recorded_clips"
 
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
-# -----------------------------
-# FACE DETECTOR (For Privacy)
-# -----------------------------
 face_cascade = cv2.CascadeClassifier(
-    cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
+    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
 )
 
+
+# ------------------------------------------------------------
+# PRIVACY BLUR FUNCTIONS
+# ------------------------------------------------------------
 def blur_faces(image):
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
     faces = face_cascade.detectMultiScale(
@@ -37,122 +34,131 @@ def blur_faces(image):
     )
 
     for (x, y, w, h) in faces:
-        roi = image[y:y+h, x:x+w]
+        roi = image[y:y + h, x:x + w]
         if roi.size > 0:
-            blurred = cv2.GaussianBlur(roi, (51, 51), 0)
-            image[y:y+h, x:x+w] = blurred
+            image[y:y + h, x:x + w] = cv2.GaussianBlur(
+                roi,
+                (99, 99),
+                30
+            )
     return image
 
-def blur_full_frame(image):
-    return cv2.GaussianBlur(image, (51, 51), 0)
 
-# ============================================================
-# CLIP RECORDER WORKER
-# ============================================================
+def blur_full_frame(image):
+    return cv2.GaussianBlur(image, (99, 99), 30)
+
+
+# ------------------------------------------------------------
+# CLIP RECORDER THREAD
+# ------------------------------------------------------------
 def clip_recorder_worker():
-    print("[clip] Clip recorder thread started.")
+    print("[clip] recorder started")
 
     while True:
         task = state.clip_queue.get()
-
         if task is None:
             break
 
         try:
             alert_type = task.get("alert_type", "Unknown")
+            snapshot = task.get("frame_snapshot", None)
+            timestamp = datetime.now().strftime("%Y-%m-%d--%H-%M-%S")
 
-            print(f"[clip] Recording clip for {alert_type}")
-
-            # -----------------------------
-            # STEP 1: Get PRE-ALERT frames
-            # -----------------------------
+            # -------------------------
+            # PRE FRAMES
+            # -------------------------
             with state.frame_lock:
-                pre_frames = list(state.frame_buffer)
+                pre_frames = [f.copy() for f in list(state.frame_buffer) if f is not None]
 
-            # -----------------------------
-            # STEP 2: Collect POST frames
-            # -----------------------------
+            # -------------------------
+            # POST FRAMES
+            # -------------------------
             post_frames = []
-            frames_needed = POST_SECONDS * FPS
-            collected = 0
-
-            while collected < frames_needed:
+            for _ in range(POST_SECONDS * FPS):
                 with state.frame_lock:
-                    frame = state.latest_frame.copy() if state.latest_frame is not None else None
-
+                    frame = (
+                        state.latest_frame.copy()
+                        if state.latest_frame is not None
+                        else snapshot
+                    )
                 if frame is not None:
                     post_frames.append(frame)
-                    collected += 1
-
                 time.sleep(1 / FPS)
 
-            # -----------------------------
-            # STEP 3: Combine frames
-            # -----------------------------
             all_frames = pre_frames + post_frames
-
             if len(all_frames) == 0:
-                print("[clip] No frames available, skipping.")
+                state.clip_queue.task_done()
                 continue
 
-            height, width, _ = all_frames[0].shape
-
-            # -----------------------------
-            # 🔐 PRIVACY ENFORCEMENT
-            # -----------------------------
+            # ------------------------------------------------
+            # PROCESS FRAMES
+            # ------------------------------------------------
             processed_frames = []
-
             for frame in all_frames:
-
-                frame_copy = frame.copy()
-
+                frame = frame.copy()
                 if alert_type == "Crowd":
-                    # Full frame blur
-                    frame_copy = blur_full_frame(frame_copy)
+                    frame = blur_full_frame(frame)
+                else:
+                    frame = blur_faces(frame)
+                processed_frames.append(frame)
 
-                elif alert_type == "Loitering":
-                    frame_copy = blur_faces(frame_copy)
-
-                elif alert_type == "Weapon":
-                    frame_copy = blur_faces(frame_copy)
-
-                elif alert_type == "Criminal":
-                    # Criminal selective blur handled in detection frame,
-                    # so blur faces here as safety fallback
-                    frame_copy = blur_faces(frame_copy)
-
-                processed_frames.append(frame_copy)
-
-            # -----------------------------
-            # STEP 4: Create filename
-            # -----------------------------
-            timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M-%S")
-            filename = f"{alert_type}_{timestamp}.mp4"
+            # ------------------------------------------------
+            # GET FRAME SIZE
+            # ------------------------------------------------
+            height, width = processed_frames[0].shape[:2]
+            filename = f"{alert_type}--{timestamp}.mp4"
             filepath = os.path.join(OUTPUT_DIR, filename)
 
-            # -----------------------------
-            # STEP 5: Write video
-            # -----------------------------
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-            out = cv2.VideoWriter(filepath, fourcc, FPS, (width, height))
+            # ------------------------------------------------
+            # VIDEO WRITER (FIXED FOR WEB PLAYBACK)
+            # ------------------------------------------------
+            # ✅ Change: Using 'avc1' (H.264) for browser compatibility
+            fourcc = cv2.VideoWriter_fourcc(*"avc1")
+
+            writer = cv2.VideoWriter(
+                filepath,
+                fourcc,
+                FPS,
+                (width, height)
+            )
+
+            # Fallback to X264 if avc1 is not available on your system
+            if not writer.isOpened():
+                print("[clip] avc1 failed, trying X264...")
+                fourcc = cv2.VideoWriter_fourcc(*"X264")
+                writer = cv2.VideoWriter(filepath, fourcc, FPS, (width, height))
+
+            if not writer.isOpened():
+                print("[clip] ERROR: Both avc1 and X264 failed. falling back to mp4v")
+                fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+                writer = cv2.VideoWriter(filepath, fourcc, FPS, (width, height))
+
+            time.sleep(0.1)
 
             for frame in processed_frames:
-                out.write(frame)
+                if frame is None:
+                    continue
+                if frame.shape[1] != width or frame.shape[0] != height:
+                    frame = cv2.resize(frame, (width, height))
+                writer.write(frame)
 
-            out.release()
-
-            print(f"[clip] Saved: {filepath}")
+            writer.release()
+            print(f"[clip] saved browser-compatible video: {filename}")
 
         except Exception as e:
-            print(f"[clip] Error: {e}")
+            print("[clip] error:", e)
 
         state.clip_queue.task_done()
 
-# ============================================================
+
+# ------------------------------------------------------------
 # START THREAD
-# ============================================================
+# ------------------------------------------------------------
 def start_clip_recorder():
-    threading.Thread(
-        target=clip_recorder_worker,
-        daemon=True
-    ).start()
+    if not any(t.name == "ClipRecorderThread" for t in threading.enumerate()):
+        t = threading.Thread(
+            target=clip_recorder_worker,
+            daemon=True,
+            name="ClipRecorderThread"
+        )
+        t.start()
