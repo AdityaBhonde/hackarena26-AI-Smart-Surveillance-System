@@ -1,5 +1,5 @@
 # ==============================
-# detection/crowd.py (Clean + Clip Support + Full Crowd Blur)
+# detection/crowd.py (Precise Face Blur + Original Logic)
 # ==============================
 
 import time
@@ -28,37 +28,40 @@ tracker = DeepSort(
 )
 
 # -----------------------------
-# FACE BLUR FUNCTION
+# PRECISE FACE BLUR FUNCTION
 # -----------------------------
-def blur_faces(image):
+def blur_all_faces(image):
+    """
+    Highly precise face blurring. 
+    Adjusted scaleFactor and minNeighbors to detect more faces in a crowd.
+    """
     if image is None:
         return image
 
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-
+    
+    # Improved parameters for better detection in crowded scenes
     faces = face_cascade.detectMultiScale(
-        gray,
-        scaleFactor=1.1,
-        minNeighbors=5,
-        minSize=(30, 30)
+        gray, 
+        scaleFactor=1.05,  # Smaller steps for higher precision
+        minNeighbors=4,     # Lowered slightly to pick up more faces in background
+        minSize=(20, 20)    # Detect smaller faces (farther away)
     )
 
     for (x, y, w, h) in faces:
+        # Ensure coordinates are within image boundaries
         x, y = max(0, x), max(0, y)
+        
+        # Extract the exact face ROI
         roi = image[y:y+h, x:x+w]
+        
         if roi.size > 0:
-            blurred = cv2.GaussianBlur(roi, (99, 99), 30)
-            image[y:y+h, x:x+w] = blurred
+            # Apply a heavy blur only to the face area
+            # (99, 99) ensures the face is unrecognizable
+            blurred_roi = cv2.GaussianBlur(roi, (99, 99), 30)
+            image[y:y+h, x:x+w] = blurred_roi
 
     return image
-
-# -----------------------------
-# FULL FRAME BLUR FUNCTION (NEW)
-# -----------------------------
-def blur_full_frame(image):
-    if image is None:
-        return image
-    return cv2.GaussianBlur(image, (51, 51), 0)
 
 # -----------------------------
 # ALERT WORKER THREAD
@@ -74,20 +77,15 @@ def alert_worker():
         try:
             sending_frame = frame.copy()
 
-            # ✅ UPDATED PRIVACY LOGIC
+            # ✅ Precise Blur only for Crowd Overload on Telegram
             if alert_type == "Crowd":
-                # Full frame blur for crowd overload
-                sending_frame = blur_full_frame(sending_frame)
-
-            elif alert_type == "Loitering":
-                # Face blur only
-                sending_frame = blur_faces(sending_frame)
+                sending_frame = blur_all_faces(sending_frame)
 
             send_telegram_alert(msg, sending_frame)
 
+            # Database logging (Untouched)
             if alert_type == "Loitering":
                 save_alert_to_db(alert_type="Loitering", person_id=extra)
-
             elif alert_type == "Crowd":
                 save_alert_to_db(alert_type="Crowd", people_count=extra)
 
@@ -96,13 +94,14 @@ def alert_worker():
 
         state.alert_queue.task_done()
 
-threading.Thread(target=alert_worker, daemon=True).start()
+# Start the worker thread
+if not any(t.name == "CrowdAlertWorker" for t in threading.enumerate()):
+    threading.Thread(target=alert_worker, daemon=True, name="CrowdAlertWorker").start()
 
 # -----------------------------
 # MAIN DETECTION FUNCTION
 # -----------------------------
 def crowd_detection():
-
     print("[INFO] Crowd + Loitering module started.")
 
     last_loiter_alert = 0
@@ -124,11 +123,8 @@ def crowd_detection():
 
         annotated = frame.copy()
 
-        # -----------------------------
-        # PERSON DETECTION
-        # -----------------------------
+        # 1. PERSON DETECTION
         results = state.yolo_crowd_model(frame, conf=0.30, verbose=False)
-
         detections = []
 
         if results and len(results) > 0 and results[0].boxes is not None:
@@ -139,16 +135,12 @@ def crowd_detection():
                     h = y2 - y1
                     detections.append(([x1, y1, w, h], float(box.conf[0]), "person"))
 
-        # -----------------------------
-        # TRACKING
-        # -----------------------------
+        # 2. TRACKING
         tracks = tracker.update_tracks(detections, frame=frame)
-
         current_time = time.time()
         active_ids = set()
 
         for track in tracks:
-
             if not track.is_confirmed():
                 continue
 
@@ -159,36 +151,20 @@ def crowd_detection():
                 state.person_entry_times[tid] = current_time
 
             duration = current_time - state.person_entry_times[tid]
-
             l, t, r, b = map(int, track.to_ltrb())
 
             # -----------------------------
-            # LOITERING CHECK (RED BOX ONLY)
+            # LOITERING CHECK (Untouched)
             # -----------------------------
             if duration >= state.LOITER_THRESHOLD:
-
                 cv2.rectangle(annotated, (l, t), (r, b), (0, 0, 255), 2)
-                cv2.putText(
-                    annotated,
-                    f"LOITERING {int(duration)}s",
-                    (l, t - 10),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6,
-                    (0, 0, 255),
-                    2
-                )
+                cv2.putText(annotated, f"LOITERING {int(duration)}s", (l, t - 10),
+                            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
                 if current_time - last_loiter_alert >= state.ALERT_COOLDOWN:
-
                     msg = f"🚨 LOITERING ALERT\nPerson ID: {tid}\nDuration: {int(duration)}s"
-
-                    state.alert_queue.put(
-                        ("Loitering", msg, frame.copy(), tid)
-                    )
-
-                    # Clip trigger (unchanged)
+                    state.alert_queue.put(("Loitering", msg, frame.copy(), tid))
                     state.clip_queue.put({"alert_type": "Loitering"})
-
                     last_loiter_alert = current_time
 
         # -----------------------------
@@ -198,33 +174,16 @@ def crowd_detection():
         state.crowd_count = str(people_count)
 
         if people_count > 35 and (current_time - last_crowd_alert >= state.ALERT_COOLDOWN):
-
             msg = f"🚨 CROWD OVERLOAD ALERT\nPeople Count: {people_count}"
-
-            state.alert_queue.put(
-                ("Crowd", msg, frame.copy(), people_count)
-            )
-
-            # Clip trigger (unchanged)
+            state.alert_queue.put(("Crowd", msg, frame.copy(), people_count))
             state.clip_queue.put({"alert_type": "Crowd"})
-
             last_crowd_alert = current_time
 
-        state.person_entry_times = {
-            k: v for k, v in state.person_entry_times.items()
-            if k in active_ids
-        }
+        state.person_entry_times = {k: v for k, v in state.person_entry_times.items() if k in active_ids}
 
-        # Show only count
-        cv2.putText(
-            annotated,
-            f"Count: {people_count}",
-            (10, 30),
-            cv2.FONT_HERSHEY_SIMPLEX,
-            1,
-            (0, 255, 0),
-            2
-        )
+        # UI for Live Feed
+        cv2.putText(annotated, f"Count: {people_count}", (10, 30),
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
 
         with state.frame_lock:
             state.processed_frames['crowd'] = annotated
