@@ -1,4 +1,6 @@
-# Backend/detection/weapon.py
+# ==============================
+# Backend/detection/weapon.py (Corrected: Blurring Removed)
+# ==============================
 import time
 from datetime import datetime
 import traceback
@@ -12,34 +14,7 @@ from utils.telegram_utils import send_telegram_alert
 from utils.db_utils import save_alert_to_db
 
 # -------------------------
-# FACE DETECTOR FOR PRIVACY BLUR (NEW)
-# -------------------------
-face_cascade = cv2.CascadeClassifier(
-    cv2.data.haarcascades + 'haarcascade_frontalface_default.xml'
-)
-
-def blur_faces(image):
-    if image is None:
-        return image
-
-    gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    faces = face_cascade.detectMultiScale(
-        gray,
-        scaleFactor=1.1,
-        minNeighbors=5,
-        minSize=(30, 30)
-    )
-
-    for (x, y, w, h) in faces:
-        roi = image[y:y+h, x:x+w]
-        if roi.size > 0:
-            blurred = cv2.GaussianBlur(roi, (51, 51), 0)
-            image[y:y+h, x:x+w] = blurred
-
-    return image
-
-# -------------------------
-# Safe helpers for YOLO 'box' formats
+# Safe helpers for YOLO 'box' formats (UNTOUCHED)
 # -------------------------
 def _safe_get_conf_and_cls(box) -> Tuple[Optional[float], Optional[int]]:
     try:
@@ -74,7 +49,7 @@ def _safe_get_xyxy(box) -> Optional[Tuple[int, int, int, int]]:
     return None
 
 # -------------------------
-# Color mapping for subclasses
+# Color mapping for subclasses (UNTOUCHED)
 # -------------------------
 DEFAULT_COLOR = (255, 255, 255)
 CLASS_COLOR_MAP = {
@@ -104,7 +79,8 @@ def weapon_detection():
     except Exception:
         print("[weapon] WARNING: Could not print model.names")
 
-    MIN_CONF = getattr(state, "DETECTION_CONF_THRESHOLD", 0.55)
+    # ✅ Set exactly to 0.45 as requested
+    MIN_CONF = 0.45 
     VALID_CLASS_KEYWORDS = ["gun", "knife", "pistol", "revolver", "firearm", "rifle", "weapon"]
     COOLDOWN = getattr(state, "ALERT_COOLDOWN", 12)
 
@@ -164,11 +140,11 @@ def weapon_detection():
                             if box_area < min_box_area:
                                 continue
 
-                        weapon_detected = True
-                        detected_name = name
-                        detected_conf = float(conf_val)
-                        detected_box = _safe_get_xyxy(box)
-                        break
+                            weapon_detected = True
+                            detected_name = name
+                            detected_conf = float(conf_val)
+                            detected_box = xy
+                            break
 
             try:
                 if hasattr(res, "plot"):
@@ -201,11 +177,9 @@ def weapon_detection():
                     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
                     alert_text = f"🚨 WEAPON DETECTED: {detected_name.upper()} ({detected_conf:.2f}) at {timestamp}"
 
-                    # 🔐 PRIVACY: blur faces before sending
-                    privacy_frame = blur_faces(annotated.copy())
-
+                    # ✅ Blurring logic removed; sending clear annotated frame
                     try:
-                        send_telegram_alert(alert_text, privacy_frame)
+                        send_telegram_alert(alert_text, annotated)
                     except Exception as e:
                         print(f"[weapon] Telegram send failed: {e}")
 
